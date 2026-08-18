@@ -17,30 +17,99 @@ import serial.tools.list_ports
 BAUD = 115200
 MAX_POINTS = 600
 
+class Biquad:
+    """Second-order Butterworth section using the RBJ cookbook coefficients."""
+    def __init__(self, filter_type, cutoff_hz, sample_hz=50.0):
+        omega = 2.0 * math.pi * cutoff_hz / sample_hz
+        cosine, sine = math.cos(omega), math.sin(omega)
+        alpha = sine / math.sqrt(2.0)
+        if filter_type == "lowpass":
+            b0, b1, b2 = (1.0 - cosine) / 2.0, 1.0 - cosine, (1.0 - cosine) / 2.0
+        else:
+            b0, b1, b2 = (1.0 + cosine) / 2.0, -(1.0 + cosine), (1.0 + cosine) / 2.0
+        a0, a1, a2 = 1.0 + alpha, -2.0 * cosine, 1.0 - alpha
+        self.b0, self.b1, self.b2 = b0 / a0, b1 / a0, b2 / a0
+        self.a1, self.a2 = a1 / a0, a2 / a0
+        self.x1 = self.x2 = self.y1 = self.y2 = 0.0
+
+    def update(self, value):
+        output = (self.b0 * value + self.b1 * self.x1 + self.b2 * self.x2
+                  - self.a1 * self.y1 - self.a2 * self.y2)
+        self.x2, self.x1 = self.x1, value
+        self.y2, self.y1 = self.y1, output
+        return output
+
+
 class PulseDetector:
-    """50 Hz pulse detector using detrending, adaptive threshold and refractory period."""
+    """50 Hz pulse detector with band-pass filtering and motion rejection."""
     def __init__(self):
-        self.baseline = None; self.envelope = 0.0; self.last_peak = None
-        self.last_value = 0.0; self.intervals = deque(maxlen=8)
+        self.highpass = Biquad("highpass", 0.7)
+        self.lowpass = Biquad("lowpass", 4.0)
+        self.started_at = None
+        self.previous_raw = None
+        self.derivative_envelope = 0.0
+        self.envelope = 0.0
+        self.previous2 = self.previous1 = 0.0
+        self.previous1_stamp = None
+        self.last_peak = None
+        self.motion_until = 0.0
+        self.intervals = deque(maxlen=8)
+        self.bpm = None
 
     def update(self, stamp, value):
-        if self.baseline is None: self.baseline = value
-        self.baseline += 0.02 * (value - self.baseline)
-        ac = value - self.baseline
-        self.envelope += 0.08 * (abs(ac) - self.envelope)
-        smooth = 0.25 * ac + 0.75 * self.last_value
-        if smooth > max(8.0, 0.55 * self.envelope) and smooth >= self.last_value:
-            if self.last_peak is None or stamp - self.last_peak >= 0.30:
-                if self.last_peak is not None and 0.30 <= stamp - self.last_peak <= 1.50:
-                    self.intervals.append(stamp - self.last_peak)
-                self.last_peak = stamp
-        self.last_value = smooth
-        bpm = None
-        if len(self.intervals) >= 2:
+        if self.started_at is None:
+            self.started_at = stamp
+        delta = 0.0 if self.previous_raw is None else value - self.previous_raw
+        motion_limit = max(500.0, 8.0 * self.derivative_envelope)
+        if self.previous_raw is not None and abs(delta) > motion_limit:
+            self.motion_until = stamp + 2.0
+            self.last_peak = None
+            self.intervals.clear()
+            self.bpm = None
+        self.derivative_envelope += 0.04 * (abs(delta) - self.derivative_envelope)
+        self.previous_raw = value
+
+        filtered = self.lowpass.update(self.highpass.update(value))
+        self.envelope += 0.04 * (abs(filtered) - self.envelope)
+        threshold = max(3.0, 0.65 * self.envelope)
+        peak = False
+        warmed_up = stamp - self.started_at >= 5.0
+        stable = stamp >= self.motion_until
+        local_maximum = self.previous1 > self.previous2 and self.previous1 >= filtered
+        if warmed_up and stable and local_maximum and self.previous1 > threshold:
+            peak_stamp = self.previous1_stamp
+            if peak_stamp is not None and (self.last_peak is None or peak_stamp - self.last_peak >= 0.30):
+                if self.last_peak is not None:
+                    interval = peak_stamp - self.last_peak
+                    if 0.30 <= interval <= 1.50:
+                        self.intervals.append(interval)
+                    else:
+                        self.intervals.clear()
+                self.last_peak = peak_stamp
+                peak = True
+
+        if len(self.intervals) >= 3:
             ordered = sorted(self.intervals)
-            bpm = 60.0 / ordered[len(ordered) // 2]
-        quality = "等待信号" if self.envelope <= 5 else ("偏弱" if not self.intervals else "良好")
-        return bpm, quality, smooth
+            median = ordered[len(ordered) // 2]
+            consistent = [x for x in self.intervals if abs(x - median) <= 0.20 * median]
+            if len(consistent) >= 3:
+                candidate = 60.0 / (sum(consistent) / len(consistent))
+                if 40.0 <= candidate <= 200.0:
+                    self.bpm = candidate
+
+        if not warmed_up:
+            quality = f"稳定中 {max(0, math.ceil(5.0 - (stamp - self.started_at)))} 秒"
+        elif not stable:
+            quality = "信号不稳定，请保持手指不动"
+        elif self.envelope < 3.0:
+            quality = "信号偏弱，请轻压传感器"
+        elif self.bpm is None:
+            quality = "正在确认稳定脉搏"
+        else:
+            quality = "良好"
+        self.previous2, self.previous1 = self.previous1, filtered
+        self.previous1_stamp = stamp
+        return self.bpm, quality, filtered, peak
 
 
 class PressureMonitor(tk.Tk):
@@ -64,6 +133,7 @@ class PressureMonitor(tk.Tk):
         self.times = deque(maxlen=MAX_POINTS)
         self.values = deque(maxlen=MAX_POINTS)
         self.pulse_values = deque(maxlen=MAX_POINTS)
+        self.pulse_peaks = deque(maxlen=MAX_POINTS)
         self.raw_values = deque(maxlen=20)
         self.last_sample_time = 0.0
         self.sample_count = 0
@@ -293,8 +363,9 @@ class PressureMonitor(tk.Tk):
         self.mv_var.set(f"{mv_avg:.1f} mV")
         self.g_var.set(f"{conductance_ms:.4f} mS")
         self.force_var.set(f"{force:.3f} N")
-        bpm, quality, pulse_wave = self.pulse.update(stamp, raw_avg)
+        bpm, quality, pulse_wave, pulse_peak = self.pulse.update(stamp, raw_avg)
         self.pulse_values.append(pulse_wave)
+        self.pulse_peaks.append(pulse_peak)
         self.bpm_var.set(f"{bpm:.0f} BPM" if bpm else "-- BPM")
         self.quality_var.set(f"脉搏信号质量：{quality}")
         self.sample_count += 1
@@ -303,7 +374,7 @@ class PressureMonitor(tk.Tk):
             self.rate_var.set(f"{self.sample_count / max(now - self.last_sample_time, 0.001):.1f} Hz")
             self.sample_count = 0; self.last_sample_time = now
         if self.recording and self.csv_writer:
-            self.csv_writer.writerow([datetime.now().isoformat(timespec="milliseconds"), f"{stamp:.3f}", f"{raw_avg:.1f}", f"{mv_avg:.2f}", f"{conductance_ms:.6f}", f"{force:.6f}"])
+            self.csv_writer.writerow([datetime.now().isoformat(timespec="milliseconds"), f"{stamp:.3f}", f"{raw_avg:.1f}", f"{mv_avg:.2f}", f"{conductance_ms:.6f}", f"{force:.6f}", f"{pulse_wave:.3f}", int(pulse_peak), f"{bpm:.1f}" if bpm else "", quality])
             self.csv_file.flush()
 
     def tare(self):
@@ -325,12 +396,12 @@ class PressureMonitor(tk.Tk):
         if not path: return
         self.csv_file = open(path, "w", newline="", encoding="utf-8-sig")
         self.csv_writer = csv.writer(self.csv_file)
-        self.csv_writer.writerow(["电脑时间", "设备时间_s", "ADC", "电压_mV", "电导_mS", "力_N"])
+        self.csv_writer.writerow(["电脑时间", "设备时间_s", "ADC", "电压_mV", "电导_mS", "力_N", "脉搏带通信号", "有效波峰", "心率_BPM", "信号质量"])
         self.recording = True
         self.record_btn.configure(text="停止保存")
 
     def clear_plot(self):
-        self.times.clear(); self.values.clear(); self.pulse_values.clear(); self.raw_values.clear(); self.pulse = PulseDetector()
+        self.times.clear(); self.values.clear(); self.pulse_values.clear(); self.pulse_peaks.clear(); self.raw_values.clear(); self.pulse = PulseDetector()
         self.bpm_var.set("-- BPM"); self.quality_var.set("脉搏信号质量：等待信号"); self.draw_plot()
 
     def draw_plot(self):
@@ -338,8 +409,9 @@ class PressureMonitor(tk.Tk):
         w, h = c.winfo_width(), c.winfo_height()
         if w < 100 or h < 100: return
         left, top, right, bottom = 66, 20, w - 20, h - 42
-        vals = list(self.pulse_values); ts = list(self.times)
-        ymax = max(1.0, max(vals, default=1.0) * 1.15); ymin = min(0.0, min(vals, default=0.0))
+        vals = list(self.pulse_values); peaks = list(self.pulse_peaks); ts = list(self.times)
+        abs_max = max(1.0, max((abs(v) for v in vals), default=1.0) * 1.15)
+        ymax, ymin = abs_max, -abs_max
         for i in range(6):
             y = top + (bottom - top) * i / 5
             value = ymax - (ymax - ymin) * i / 5
@@ -354,6 +426,11 @@ class PressureMonitor(tk.Tk):
                 y = bottom - (v - ymin) / max(ymax - ymin, 1e-6) * (bottom - top)
                 points.extend((x, y))
             c.create_line(*points, fill="#e34b38", width=2, smooth=False)
+            for t, v, is_peak in zip(ts, vals, peaks):
+                if is_peak:
+                    x = left + (t - tmin) / (tmax - tmin) * (right - left)
+                    y = bottom - (v - ymin) / (ymax - ymin) * (bottom - top)
+                    c.create_oval(x - 4, y - 4, x + 4, y + 4, fill="#b13c92", outline="white", width=1)
             c.create_text(left, bottom + 20, text=f"{tmin:.1f}s", anchor="w", fill="#65727e")
             c.create_text(right, bottom + 20, text=f"{tmax:.1f}s", anchor="e", fill="#65727e")
         else:
