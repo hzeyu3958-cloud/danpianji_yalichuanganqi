@@ -40,7 +40,7 @@ class PulseDetector:
             ordered = sorted(self.intervals)
             bpm = 60.0 / ordered[len(ordered) // 2]
         quality = "等待信号" if self.envelope <= 5 else ("偏弱" if not self.intervals else "良好")
-        return bpm, quality
+        return bpm, quality, smooth
 
 
 class PressureMonitor(tk.Tk):
@@ -63,6 +63,7 @@ class PressureMonitor(tk.Tk):
         self.start_time = time.monotonic()
         self.times = deque(maxlen=MAX_POINTS)
         self.values = deque(maxlen=MAX_POINTS)
+        self.pulse_values = deque(maxlen=MAX_POINTS)
         self.raw_values = deque(maxlen=20)
         self.last_sample_time = 0.0
         self.sample_count = 0
@@ -292,7 +293,8 @@ class PressureMonitor(tk.Tk):
         self.mv_var.set(f"{mv_avg:.1f} mV")
         self.g_var.set(f"{conductance_ms:.4f} mS")
         self.force_var.set(f"{force:.3f} N")
-        bpm, quality = self.pulse.update(stamp, raw_avg)
+        bpm, quality, pulse_wave = self.pulse.update(stamp, raw_avg)
+        self.pulse_values.append(pulse_wave)
         self.bpm_var.set(f"{bpm:.0f} BPM" if bpm else "-- BPM")
         self.quality_var.set(f"脉搏信号质量：{quality}")
         self.sample_count += 1
@@ -328,7 +330,7 @@ class PressureMonitor(tk.Tk):
         self.record_btn.configure(text="停止保存")
 
     def clear_plot(self):
-        self.times.clear(); self.values.clear(); self.raw_values.clear(); self.pulse = PulseDetector()
+        self.times.clear(); self.values.clear(); self.pulse_values.clear(); self.raw_values.clear(); self.pulse = PulseDetector()
         self.bpm_var.set("-- BPM"); self.quality_var.set("脉搏信号质量：等待信号"); self.draw_plot()
 
     def draw_plot(self):
@@ -336,7 +338,7 @@ class PressureMonitor(tk.Tk):
         w, h = c.winfo_width(), c.winfo_height()
         if w < 100 or h < 100: return
         left, top, right, bottom = 66, 20, w - 20, h - 42
-        vals = list(self.values); ts = list(self.times)
+        vals = list(self.pulse_values); ts = list(self.times)
         ymax = max(1.0, max(vals, default=1.0) * 1.15); ymin = min(0.0, min(vals, default=0.0))
         for i in range(6):
             y = top + (bottom - top) * i / 5
