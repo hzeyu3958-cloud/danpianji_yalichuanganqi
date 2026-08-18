@@ -17,6 +17,31 @@ import serial.tools.list_ports
 BAUD = 115200
 MAX_POINTS = 600
 
+class PulseDetector:
+    """50 Hz pulse detector using detrending, adaptive threshold and refractory period."""
+    def __init__(self):
+        self.baseline = None; self.envelope = 0.0; self.last_peak = None
+        self.last_value = 0.0; self.intervals = deque(maxlen=8)
+
+    def update(self, stamp, value):
+        if self.baseline is None: self.baseline = value
+        self.baseline += 0.02 * (value - self.baseline)
+        ac = value - self.baseline
+        self.envelope += 0.08 * (abs(ac) - self.envelope)
+        smooth = 0.25 * ac + 0.75 * self.last_value
+        if smooth > max(8.0, 0.55 * self.envelope) and smooth >= self.last_value:
+            if self.last_peak is None or stamp - self.last_peak >= 0.30:
+                if self.last_peak is not None and 0.30 <= stamp - self.last_peak <= 1.50:
+                    self.intervals.append(stamp - self.last_peak)
+                self.last_peak = stamp
+        self.last_value = smooth
+        bpm = None
+        if len(self.intervals) >= 2:
+            ordered = sorted(self.intervals)
+            bpm = 60.0 / ordered[len(ordered) // 2]
+        quality = "等待信号" if self.envelope <= 5 else ("偏弱" if not self.intervals else "良好")
+        return bpm, quality
+
 
 class PressureMonitor(tk.Tk):
     def __init__(self):
@@ -42,6 +67,7 @@ class PressureMonitor(tk.Tk):
         self.last_sample_time = 0.0
         self.sample_count = 0
         self.tare_g = 0.0
+        self.pulse = PulseDetector()
 
         self.port_var = tk.StringVar()
         self.status_var = tk.StringVar(value="未连接")
@@ -49,6 +75,8 @@ class PressureMonitor(tk.Tk):
         self.mv_var = tk.StringVar(value="-- mV")
         self.g_var = tk.StringVar(value="-- mS")
         self.force_var = tk.StringVar(value="-- N")
+        self.bpm_var = tk.StringVar(value="-- BPM")
+        self.quality_var = tk.StringVar(value="脉搏信号质量：等待信号")
         self.rate_var = tk.StringVar(value="0 Hz")
         self.p1_var = tk.StringVar(value="1.000")
         self.p2_var = tk.StringVar(value="0.000")
@@ -121,11 +149,13 @@ class PressureMonitor(tk.Tk):
 
         metrics = ttk.Frame(main)
         metrics.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        for i in range(4): metrics.columnconfigure(i, weight=1)
+        for i in range(5): metrics.columnconfigure(i, weight=1)
         self._metric(metrics, 0, "压力 / 力", self.force_var, "#e34b38")
         self._metric(metrics, 1, "电导", self.g_var, "#16846b")
         self._metric(metrics, 2, "传感器电压", self.mv_var, "#2673b8")
         self._metric(metrics, 3, "ADC 原始值", self.raw_var, "#5d6570")
+        self._metric(metrics, 4, "脉搏心率", self.bpm_var, "#b13c92")
+        ttk.Label(main, textvariable=self.quality_var).grid(row=2, column=0, sticky="e", pady=(5, 0))
 
         chart_panel = ttk.Frame(main, style="Panel.TFrame", padding=12)
         chart_panel.grid(row=1, column=0, sticky="nsew")
@@ -262,6 +292,9 @@ class PressureMonitor(tk.Tk):
         self.mv_var.set(f"{mv_avg:.1f} mV")
         self.g_var.set(f"{conductance_ms:.4f} mS")
         self.force_var.set(f"{force:.3f} N")
+        bpm, quality = self.pulse.update(stamp, raw_avg)
+        self.bpm_var.set(f"{bpm:.0f} BPM" if bpm else "-- BPM")
+        self.quality_var.set(f"脉搏信号质量：{quality}")
         self.sample_count += 1
         now = time.monotonic()
         if now - self.last_sample_time >= 1.0:
@@ -295,7 +328,8 @@ class PressureMonitor(tk.Tk):
         self.record_btn.configure(text="停止保存")
 
     def clear_plot(self):
-        self.times.clear(); self.values.clear(); self.raw_values.clear(); self.draw_plot()
+        self.times.clear(); self.values.clear(); self.raw_values.clear(); self.pulse = PulseDetector()
+        self.bpm_var.set("-- BPM"); self.quality_var.set("脉搏信号质量：等待信号"); self.draw_plot()
 
     def draw_plot(self):
         c = self.canvas; c.delete("all")
