@@ -46,7 +46,7 @@ class PulseDetector:
 class PressureMonitor(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("压力传感器实时监测")
+        self.title("脉搏波形监测")
         self.geometry("1180x720")
         self.minsize(900, 600)
         self.configure(bg="#eef1f4")
@@ -101,7 +101,7 @@ class PressureMonitor(tk.Tk):
 
         header = ttk.Frame(self, padding=(20, 15, 20, 10))
         header.pack(fill="x")
-        ttk.Label(header, text="柔性压力传感器监测", style="Title.TLabel").pack(side="left")
+        ttk.Label(header, text="脉搏波形监测", style="Title.TLabel").pack(side="left")
         self.dot = tk.Canvas(header, width=14, height=14, bg="#eef1f4", highlightthickness=0)
         self.dot.create_oval(2, 2, 12, 12, fill="#aeb7bf", outline="", tags="dot")
         self.dot.pack(side="right", padx=(8, 0))
@@ -127,7 +127,7 @@ class PressureMonitor(tk.Tk):
         self.sim_btn.pack(fill="x", pady=4)
 
         ttk.Separator(side).pack(fill="x", pady=14)
-        ttk.Label(side, text="换算参数", style="Panel.TLabel", font=("Microsoft YaHei UI", 11, "bold")).pack(anchor="w")
+        ttk.Label(side, text="脉搏信号设置", style="Panel.TLabel", font=("Microsoft YaHei UI", 11, "bold")).pack(anchor="w")
         self._field(side, "分压电阻 (kΩ)", self.rref_var)
         self._field(side, "供电电压 (mV)", self.vcc_var)
         self._field(side, "线性参数 p1", self.p1_var)
@@ -150,7 +150,7 @@ class PressureMonitor(tk.Tk):
         metrics = ttk.Frame(main)
         metrics.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         for i in range(5): metrics.columnconfigure(i, weight=1)
-        self._metric(metrics, 0, "压力 / 力", self.force_var, "#e34b38")
+        self._metric(metrics, 0, "脉搏波幅", self.force_var, "#e34b38")
         self._metric(metrics, 1, "电导", self.g_var, "#16846b")
         self._metric(metrics, 2, "传感器电压", self.mv_var, "#2673b8")
         self._metric(metrics, 3, "ADC 原始值", self.raw_var, "#5d6570")
@@ -163,7 +163,7 @@ class PressureMonitor(tk.Tk):
         chart_panel.columnconfigure(0, weight=1)
         chart_head = ttk.Frame(chart_panel, style="Panel.TFrame")
         chart_head.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        ttk.Label(chart_head, text="实时变化曲线", style="Panel.TLabel", font=("Microsoft YaHei UI", 11, "bold")).pack(side="left")
+        ttk.Label(chart_head, text="实时脉搏波形", style="Panel.TLabel", font=("Microsoft YaHei UI", 11, "bold")).pack(side="left")
         ttk.Label(chart_head, textvariable=self.rate_var, style="Panel.TLabel").pack(side="right")
         self.canvas = tk.Canvas(chart_panel, bg="#ffffff", highlightthickness=0)
         self.canvas.grid(row=1, column=0, sticky="nsew")
@@ -343,7 +343,7 @@ class PressureMonitor(tk.Tk):
             value = ymax - (ymax - ymin) * i / 5
             c.create_line(left, y, right, y, fill="#e5e9ed")
             c.create_text(left - 8, y, text=f"{value:.2f}", anchor="e", fill="#65727e", font=("Segoe UI", 9))
-        c.create_text(13, (top + bottom) / 2, text="力 (N)", angle=90, fill="#52606c")
+        c.create_text(13, (top + bottom) / 2, text="脉搏波幅", angle=90, fill="#52606c")
         if len(vals) > 1:
             tmin, tmax = ts[0], max(ts[-1], ts[0] + 0.001)
             points = []
@@ -355,7 +355,7 @@ class PressureMonitor(tk.Tk):
             c.create_text(left, bottom + 20, text=f"{tmin:.1f}s", anchor="w", fill="#65727e")
             c.create_text(right, bottom + 20, text=f"{tmax:.1f}s", anchor="e", fill="#65727e")
         else:
-            c.create_text((left + right) / 2, (top + bottom) / 2, text="连接开发板或启动模拟数据", fill="#8b969f", font=("Microsoft YaHei UI", 12))
+            c.create_text((left + right) / 2, (top + bottom) / 2, text="连接传感器并保持手指稳定", fill="#8b969f", font=("Microsoft YaHei UI", 12))
 
     def set_status(self, text, color):
         self.status_var.set(text); self.dot.itemconfigure("dot", fill=color)
