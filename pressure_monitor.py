@@ -134,6 +134,7 @@ class PressureMonitor(tk.Tk):
         self.values = deque(maxlen=MAX_POINTS)
         self.pulse_values = deque(maxlen=MAX_POINTS)
         self.pulse_peaks = deque(maxlen=MAX_POINTS)
+        self.plot_scale = 10.0
         self.raw_values = deque(maxlen=20)
         self.last_sample_time = 0.0
         self.sample_count = 0
@@ -401,7 +402,7 @@ class PressureMonitor(tk.Tk):
         self.record_btn.configure(text="停止保存")
 
     def clear_plot(self):
-        self.times.clear(); self.values.clear(); self.pulse_values.clear(); self.pulse_peaks.clear(); self.raw_values.clear(); self.pulse = PulseDetector()
+        self.times.clear(); self.values.clear(); self.pulse_values.clear(); self.pulse_peaks.clear(); self.raw_values.clear(); self.pulse = PulseDetector(); self.plot_scale = 10.0
         self.bpm_var.set("-- BPM"); self.quality_var.set("脉搏信号质量：等待信号"); self.draw_plot()
 
     def draw_plot(self):
@@ -410,8 +411,14 @@ class PressureMonitor(tk.Tk):
         if w < 100 or h < 100: return
         left, top, right, bottom = 66, 20, w - 20, h - 42
         vals = list(self.pulse_values); peaks = list(self.pulse_peaks); ts = list(self.times)
-        abs_max = max(1.0, max((abs(v) for v in vals), default=1.0) * 1.15)
-        ymax, ymin = abs_max, -abs_max
+        # Ignore the largest few samples when choosing the axis, so one motion
+        # artifact cannot flatten the pulse waveform or make the scale jump.
+        magnitudes = sorted(abs(v) for v in vals)
+        if magnitudes:
+            robust_peak = magnitudes[max(0, int(len(magnitudes) * 0.95) - 1)]
+            target_scale = max(8.0, robust_peak * 1.45)
+            self.plot_scale += 0.12 * (target_scale - self.plot_scale)
+        ymax, ymin = self.plot_scale, -self.plot_scale
         for i in range(6):
             y = top + (bottom - top) * i / 5
             value = ymax - (ymax - ymin) * i / 5
@@ -423,13 +430,15 @@ class PressureMonitor(tk.Tk):
             points = []
             for t, v in zip(ts, vals):
                 x = left + (t - tmin) / (tmax - tmin) * (right - left)
-                y = bottom - (v - ymin) / max(ymax - ymin, 1e-6) * (bottom - top)
+                shown = max(ymin, min(ymax, v))
+                y = bottom - (shown - ymin) / max(ymax - ymin, 1e-6) * (bottom - top)
                 points.extend((x, y))
             c.create_line(*points, fill="#e34b38", width=2, smooth=False)
             for t, v, is_peak in zip(ts, vals, peaks):
                 if is_peak:
                     x = left + (t - tmin) / (tmax - tmin) * (right - left)
-                    y = bottom - (v - ymin) / (ymax - ymin) * (bottom - top)
+                    shown = max(ymin, min(ymax, v))
+                    y = bottom - (shown - ymin) / (ymax - ymin) * (bottom - top)
                     c.create_oval(x - 4, y - 4, x + 4, y + 4, fill="#b13c92", outline="white", width=1)
             c.create_text(left, bottom + 20, text=f"{tmin:.1f}s", anchor="w", fill="#65727e")
             c.create_text(right, bottom + 20, text=f"{tmax:.1f}s", anchor="e", fill="#65727e")
