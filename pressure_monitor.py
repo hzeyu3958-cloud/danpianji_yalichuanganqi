@@ -134,7 +134,7 @@ class PressureMonitor(tk.Tk):
         self.values = deque(maxlen=MAX_POINTS)
         self.pulse_values = deque(maxlen=MAX_POINTS)
         self.pulse_peaks = deque(maxlen=MAX_POINTS)
-        self.plot_scale = 10.0
+        self.plot_scale = 20.0
         self.raw_values = deque(maxlen=20)
         self.last_sample_time = 0.0
         self.sample_count = 0
@@ -155,6 +155,7 @@ class PressureMonitor(tk.Tk):
         self.rref_var = tk.StringVar(value="10.0")
         self.vcc_var = tk.StringVar(value="3300")
         self.filter_var = tk.IntVar(value=5)
+        self.surrounding_force_var = tk.StringVar(value="0.020")
 
         self._build_ui()
         self.refresh_ports()
@@ -204,6 +205,7 @@ class PressureMonitor(tk.Tk):
         self._field(side, "供电电压 (mV)", self.vcc_var)
         self._field(side, "线性参数 p1", self.p1_var)
         self._field(side, "线性参数 p2", self.p2_var)
+        self._field(side, "周边压力补偿 (N)", self.surrounding_force_var)
         ttk.Label(side, text="F = p1 × G + p2\nG 单位为 mS，F 单位为 N", style="Panel.TLabel").pack(anchor="w", pady=(5, 8))
         ttk.Label(side, text="平滑点数", style="Panel.TLabel").pack(anchor="w")
         ttk.Scale(side, from_=1, to=20, variable=self.filter_var, orient="horizontal").pack(fill="x")
@@ -240,6 +242,10 @@ class PressureMonitor(tk.Tk):
         self.canvas = tk.Canvas(chart_panel, bg="#ffffff", highlightthickness=0)
         self.canvas.grid(row=1, column=0, sticky="nsew")
         self.canvas.bind("<Configure>", lambda _e: self.draw_plot())
+        self.canvas.bind("<MouseWheel>", self.zoom_plot)
+        self.canvas.bind("<Button-4>", self.zoom_plot)
+        self.canvas.bind("<Button-5>", self.zoom_plot)
+        ttk.Label(chart_head, text="滚轮缩放纵坐标", style="Panel.TLabel").pack(side="right", padx=(0, 14))
 
     def _field(self, parent, label, variable):
         ttk.Label(parent, text=label, style="Panel.TLabel").pack(anchor="w", pady=(8, 2))
@@ -348,6 +354,7 @@ class PressureMonitor(tk.Tk):
             vcc = float(self.vcc_var.get())
             p1 = float(self.p1_var.get())
             p2 = float(self.p2_var.get())
+            surrounding_force = float(self.surrounding_force_var.get())
         except ValueError:
             return
         self.raw_values.append((raw, mv))
@@ -357,7 +364,7 @@ class PressureMonitor(tk.Tk):
         # Wiring: 3V3 -- sensor -- ADC -- Rref -- GND
         sensor_r_kohm = rref * max(vcc - mv_avg, 0.001) / max(mv_avg, 0.001)
         conductance_ms = 1.0 / max(sensor_r_kohm, 0.000001)
-        force = p1 * max(0.0, conductance_ms - self.tare_g) + p2
+        force = max(0.0, p1 * max(0.0, conductance_ms - self.tare_g) + p2 - surrounding_force)
         self.times.append(stamp)
         self.values.append(force)
         self.raw_var.set(f"{raw_avg:.0f}")
@@ -402,7 +409,7 @@ class PressureMonitor(tk.Tk):
         self.record_btn.configure(text="停止保存")
 
     def clear_plot(self):
-        self.times.clear(); self.values.clear(); self.pulse_values.clear(); self.pulse_peaks.clear(); self.raw_values.clear(); self.pulse = PulseDetector(); self.plot_scale = 10.0
+        self.times.clear(); self.values.clear(); self.pulse_values.clear(); self.pulse_peaks.clear(); self.raw_values.clear(); self.pulse = PulseDetector(); self.plot_scale = 20.0
         self.bpm_var.set("-- BPM"); self.quality_var.set("脉搏信号质量：等待信号"); self.draw_plot()
 
     def draw_plot(self):
@@ -411,13 +418,6 @@ class PressureMonitor(tk.Tk):
         if w < 100 or h < 100: return
         left, top, right, bottom = 66, 20, w - 20, h - 42
         vals = list(self.pulse_values); peaks = list(self.pulse_peaks); ts = list(self.times)
-        # Ignore the largest few samples when choosing the axis, so one motion
-        # artifact cannot flatten the pulse waveform or make the scale jump.
-        magnitudes = sorted(abs(v) for v in vals)
-        if magnitudes:
-            robust_peak = magnitudes[max(0, int(len(magnitudes) * 0.95) - 1)]
-            target_scale = max(8.0, robust_peak * 1.45)
-            self.plot_scale += 0.12 * (target_scale - self.plot_scale)
         ymax, ymin = self.plot_scale, -self.plot_scale
         for i in range(6):
             y = top + (bottom - top) * i / 5
@@ -444,6 +444,15 @@ class PressureMonitor(tk.Tk):
             c.create_text(right, bottom + 20, text=f"{tmax:.1f}s", anchor="e", fill="#65727e")
         else:
             c.create_text((left + right) / 2, (top + bottom) / 2, text="连接传感器并保持手指稳定", fill="#8b969f", font=("Microsoft YaHei UI", 12))
+
+    def zoom_plot(self, event):
+        """Change the fixed vertical range only in response to the mouse wheel."""
+        delta = getattr(event, "delta", 0)
+        if delta == 0:
+            delta = 120 if getattr(event, "num", 0) == 4 else -120
+        self.plot_scale *= 0.8 if delta > 0 else 1.25
+        self.plot_scale = max(2.0, min(2000.0, self.plot_scale))
+        self.draw_plot()
 
     def set_status(self, text, color):
         self.status_var.set(text); self.dot.itemconfigure("dot", fill=color)
