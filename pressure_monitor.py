@@ -16,6 +16,8 @@ import serial.tools.list_ports
 
 BAUD = 115200
 MAX_POINTS = 600
+CONTACT_ADC_MIN = 25.0
+MIN_PULSE_ENVELOPE = 6.0
 
 class Biquad:
     """Second-order Butterworth section using the RBJ cookbook coefficients."""
@@ -71,12 +73,29 @@ class PulseDetector:
 
         filtered = self.lowpass.update(self.highpass.update(value))
         self.envelope += 0.04 * (abs(filtered) - self.envelope)
+        has_contact = value >= CONTACT_ADC_MIN
+        if not has_contact:
+            self.last_peak = None
+            self.intervals.clear()
+            self.bpm = None
+            self.motion_until = stamp + 0.25
+            self.previous2, self.previous1 = self.previous1, filtered
+            self.previous1_stamp = stamp
+            return None, "未检测到有效压力", 0.0, False
+
+        # A quiet sensor can still contain ADC/electrical noise. Do not expose
+        # that noise as a pulse waveform or use it to calculate BPM.
+        signal_ready = self.envelope >= MIN_PULSE_ENVELOPE
+        if self.last_peak is not None and stamp - self.last_peak > 2.0:
+            self.last_peak = None
+            self.intervals.clear()
+            self.bpm = None
         threshold = max(3.0, 0.65 * self.envelope)
         peak = False
         warmed_up = stamp - self.started_at >= 5.0
         stable = stamp >= self.motion_until
         local_maximum = self.previous1 > self.previous2 and self.previous1 >= filtered
-        if warmed_up and stable and local_maximum and self.previous1 > threshold:
+        if warmed_up and stable and signal_ready and local_maximum and self.previous1 > threshold:
             peak_stamp = self.previous1_stamp
             if peak_stamp is not None and (self.last_peak is None or peak_stamp - self.last_peak >= 0.30):
                 if self.last_peak is not None:
@@ -101,15 +120,15 @@ class PulseDetector:
             quality = f"稳定中 {max(0, math.ceil(5.0 - (stamp - self.started_at)))} 秒"
         elif not stable:
             quality = "信号不稳定，请保持手指不动"
-        elif self.envelope < 3.0:
-            quality = "信号偏弱，请轻压传感器"
+        elif not signal_ready:
+            quality = "未检测到明显脉搏，请轻压并保持稳定"
         elif self.bpm is None:
             quality = "正在确认稳定脉搏"
         else:
             quality = "良好"
         self.previous2, self.previous1 = self.previous1, filtered
         self.previous1_stamp = stamp
-        return self.bpm, quality, filtered, peak
+        return self.bpm, quality, filtered if signal_ready else 0.0, peak
 
 
 class PressureMonitor(tk.Tk):
